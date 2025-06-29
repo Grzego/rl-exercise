@@ -1,0 +1,14 @@
+[project]
+name = "qed-homework"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.6.2",
+    "matplotlib>=3.10.3",
+    "numpy>=2.3.1",
+    "pyqt6>=6.9.1",
+    "tqdm>=4.67.1",
+    "tyro>=0.9.24",
+]
