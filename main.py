@@ -204,7 +204,7 @@ def main():
             if step % 10 == 0:
                 eval_reward = evaluate_agent(env, agent, agent_params, num_episodes=20, seed=1337)
                 pbar.set_description_str(
-                    f"mean reward: {jnp.mean(transitions.reward):6.2f}, eval reward: {eval_reward:6.2f}"
+                    f"mean reward: {jnp.mean(transitions.reward):8.4f}, eval reward: {eval_reward:8.4f}"
                 )
 
     with open(args.agent_save_path, "wb") as file:
@@ -230,8 +230,8 @@ def main():
         enable_progressbar=True,
     )
 
-    print(f"Average reward over {args.eval_num_episodes} episodes: {eval_reward:.2f}")
-    print(f"Average reward of greedy policy: {eval_greedy:.2f}")
+    print(f"Average reward over {args.eval_num_episodes} episodes: {eval_reward:.4f}")
+    print(f"Average reward of greedy policy: {eval_greedy:.4f}")
 
     visualize_policy(env, agent, agent_params)
 
