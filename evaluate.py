@@ -21,10 +21,13 @@ def main():
     env = Environment()
 
     with open(args.agent_path, "rb") as file:
-        agent = pickle.load(file)
+        checkpoint = pickle.load(file)
+
+    agent = checkpoint["agent"]
+    agent_params = checkpoint["agent_params"]
 
     average_reward = evaluate_agent(
-        env, agent, num_episodes=args.num_eval_episodes, seed=args.random_seed, enable_progressbar=True
+        env, agent, agent_params, num_episodes=args.num_eval_episodes, seed=args.random_seed, enable_progressbar=True
     )
     print(f"Average reward over {args.num_eval_episodes} episodes: {average_reward:.2f}")
 

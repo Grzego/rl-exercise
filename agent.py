@@ -5,6 +5,9 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import optax
+
+type Params = dict[str, jnp.ndarray]
 
 
 class Transition(NamedTuple):
@@ -17,7 +20,9 @@ class Transition(NamedTuple):
 
 class BaseAgent(ABC):
     @abstractmethod
-    def act(self, key: jnp.ndarray, observation: jnp.ndarray, deterministic: bool = False) -> int | jnp.ndarray:
+    def act(
+        self, key: jnp.ndarray, params: Params, observation: jnp.ndarray, deterministic: bool = False
+    ) -> int | jnp.ndarray:
         """
         Given an observation, return an action.
 
@@ -31,7 +36,7 @@ class BaseAgent(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def train(self, transitions: Transition, **kwargs):
+    def train(self, params: Params, transitions: Transition, **kwargs):
         """
         Train the agent using collected transitions.
 
@@ -47,80 +52,91 @@ class PolicyGradientAgent(BaseAgent):
     A simple policy gradient agent that uses a neural network to approximate the policy.
     """
 
-    def __init__(self, key: jnp.ndarray, observation_shape: tuple, num_actions: int = 8, hidden_size: int = 128):
+    def __init__(self, observation_shape: tuple, num_actions: int = 8, hidden_size: int = 128):
+        self.observation_shape = observation_shape
         self.num_actions = num_actions
-        input_features = reduce(mul, observation_shape, 1)
+        self.hidden_size = hidden_size
 
+    def init_params(self, key: jnp.ndarray) -> Params:
+        """
+        Initialize the parameters of the agent's policy network.
+        """
+        input_features = reduce(mul, self.observation_shape, 1)
         w1_key, w2_key = jax.random.split(key, num=2)
-        self.params = {
-            "w1": 1e-1 * jax.random.normal(w1_key, (input_features, hidden_size)),
-            "b1": jnp.zeros((hidden_size,)),
-            "w2": 1e-1 * jax.random.normal(w2_key, (hidden_size, num_actions)),
-            "b2": jnp.zeros((num_actions,)),
+
+        initializer = jax.nn.initializers.glorot_normal()
+
+        return {
+            "w1": initializer(w1_key, (input_features, self.hidden_size)),
+            "b1": jnp.zeros((self.hidden_size,)),
+            "w2": initializer(w2_key, (self.hidden_size, self.num_actions)),
+            "b2": jnp.zeros((self.num_actions,)),
         }
 
     @partial(jax.jit, static_argnames=("self",))
-    def _forward(self, params: dict[str, jnp.ndarray], observation: jnp.ndarray) -> jnp.ndarray:
+    def _forward(self, params: Params, observation: jnp.ndarray) -> jnp.ndarray:
         """
         Forward pass through the neural network to compute action logits.
         """
-        is_single_observation = observation.ndim == 1
-        observation = observation[None, ...] if is_single_observation else observation
         hidden = jax.nn.gelu(jnp.matmul(observation, params["w1"]) + params["b1"])
-        logits = jnp.matmul(hidden, params["w2"]) + params["b2"]
-        return logits[0] if is_single_observation else logits
+        action_logits = jnp.matmul(hidden, params["w2"]) + params["b2"]
+        return action_logits
 
-    def act(self, key: jnp.ndarray, observation: jnp.ndarray, deterministic: bool = False) -> int | jnp.ndarray:
+    @partial(jax.jit, static_argnames=("self", "deterministic"))
+    def act(
+        self, key: jnp.ndarray, params: Params, observation: jnp.ndarray, deterministic: bool = False
+    ) -> int | jnp.ndarray:
         """
         Select an action based on the current observation. Output can be a single action or a batch of actions
         depending on the shape of the observation.
         """
-        action_logits = self._forward(self.params, observation)
+        action_logits = self._forward(params, observation)
         if deterministic:
-            return jnp.argmax(action_logits, axis=-1)
+            return jnp.argmax(action_logits, axis=-1, keepdims=True)  # [batch_size, 1]
 
         # add a gumbel noise to the logits to improve exploration
         gumbel_noise = jax.random.gumbel(key, shape=action_logits.shape)
-        return jax.random.categorical(key, action_logits + gumbel_noise, axis=-1)
+        return jax.random.categorical(key, action_logits + gumbel_noise, axis=-1)[..., None]  # [batch_size, 1]
 
     def _policy_loss(
         self,
-        params: dict[str, jnp.ndarray],
+        params: Params,
         transitions: Transition,
         advantage: jnp.ndarray,
         entropy_factor: float = 1e-3,
     ) -> jnp.ndarray:
         batch_size, *_ = advantage.shape
 
-        action_log_probs = jax.nn.log_softmax(
-            self._forward(params, transitions.observation), axis=-1
-        )  # [batch_size, num_actions]
+        action_logits = self._forward(params, transitions.observation)
+        action_log_probs = jax.nn.log_softmax(action_logits, axis=-1)  # [batch_size, num_actions]
 
         # entropy penalty to encourage exploration
         entropy_penalty = -jnp.mean(jnp.sum(jnp.exp(action_log_probs) * action_log_probs, axis=-1))
 
-        selected_action_log_probs = action_log_probs[jnp.arange(batch_size), transitions.action]  # [batch_size]
+        selected_action_log_probs = action_log_probs[jnp.arange(batch_size), transitions.action[..., 0]]  # [batch_size]
+        actor_loss = -jnp.mean(selected_action_log_probs * advantage[..., 0])  # [batch_size]
         # minimizing this loss will encourage actions that have positive advantage and discourage
         # those with negative advantage
-        return -jnp.mean(advantage * selected_action_log_probs) + entropy_factor * entropy_penalty
+        return actor_loss + entropy_factor * entropy_penalty
 
     @partial(jax.jit, static_argnames=("self", "entropy_factor"))
     def _policy_gradient(
         self,
-        params: dict[str, jnp.ndarray],
+        params: Params,
         transitions: Transition,
-        advantage: jnp.ndarray,
+        rewards: jnp.ndarray,
         entropy_factor: float = 1e-3,
     ) -> jnp.ndarray:
-        return jax.grad(self._policy_loss)(params, transitions, advantage, entropy_factor)
+        return jax.grad(self._policy_loss)(params, transitions, rewards, entropy_factor)
 
-    @partial(jax.jit, static_argnames=("self", "discount", "learning_rate", "entropy_factor"))
-    def _train(
+    @partial(jax.jit, static_argnames=("self", "discount", "optimizer", "entropy_factor"))
+    def train(
         self,
-        params: dict[str, jnp.ndarray],
+        params: Params,
+        opt_state: optax.OptState,
         transitions: Transition,
+        optimizer: optax.GradientTransformationExtraArgs,
         discount: float = 1.0,
-        learning_rate: float = 1e-3,
         entropy_factor: float = 1e-3,
     ):
         """
@@ -137,36 +153,17 @@ class PolicyGradientAgent(BaseAgent):
 
         _, cumulative_rewards = jax.lax.scan(
             _discount_rewards,
-            0.0,
+            jnp.array([0.0]),
             transitions,
             reverse=True,
         )
 
-        # use cumulative rewards as advantage
-        advantage = cumulative_rewards
-        params_grad = self._policy_gradient(params, transitions, advantage, entropy_factor)
+        normalized_rewards = (cumulative_rewards - jnp.mean(cumulative_rewards)) / (jnp.std(cumulative_rewards) + 1e-8)
+        params_grad = self._policy_gradient(params, transitions, normalized_rewards, entropy_factor)
 
-        # update parameters using the computed gradients (simple SGD update)
-        updated_params = jax.tree.map(
-            lambda p, g: p - learning_rate * g,
-            params,
-            params_grad,
-        )
-        return updated_params
-
-    def train(
-        self, transitions: Transition, discount: float = 1.0, learning_rate: float = 1e-3, entropy_factor: float = 1e-3
-    ):
-        # clip rewards to avoid large updates and stabilize training
-        transitions = transitions._replace(reward=jnp.clip(transitions.reward, -10.0, 10.0))
-
-        self.params = self._train(
-            self.params,
-            transitions,
-            discount=discount,
-            learning_rate=learning_rate,
-            entropy_factor=entropy_factor,
-        )
+        updates, opt_state = optimizer.update(params_grad, opt_state, params)
+        updated_params = optax.apply_updates(params, updates)
+        return updated_params, opt_state
 
 
 class GreedyPolicy(BaseAgent):
@@ -179,7 +176,7 @@ class GreedyPolicy(BaseAgent):
     def __init__(self, environment: "Environment"):
         self.environment = environment
 
-    def act(self, key: jnp.ndarray, observation: jnp.ndarray, deterministic: bool = True) -> int:
+    def act(self, key: jnp.ndarray, params: Params, observation: jnp.ndarray, deterministic: bool = True) -> int:
         """
         Return the action that maximizes the reward based on the current observation.
         """
@@ -189,9 +186,9 @@ class GreedyPolicy(BaseAgent):
             jnp.maximum(0.0, jnp.sin(next_observation[..., 0])),
             -10.0,
         )  # [..., num_actions]
-        return jnp.argmax(rewards, axis=-1)
+        return jnp.argmax(rewards, axis=-1, keepdims=True)  # [..., 1]
 
-    def train(self, transitions: Transition, **kwargs):
+    def train(self, params: Params, transitions: Transition, **kwargs):
         """
         This policy cannot be trained, so this method is a no-op.
         """

@@ -16,10 +16,12 @@ uv run main.py
 
 Example output:
 ```bash
-mean reward:  -0.17, eval reward:   8.28: 100%|████████████████████| 500/500 [01:05<00:00,  7.59it/s]
+mean reward:   0.86, eval reward:   8.56: 100%|███████████████| 10000/10000 [00:47<00:00, 210.83it/s]
 Trained agent saved to "agent.pkl"
-evaluating agent: 100%|█████████████████████████████████████████| 1000/1000 [00:03<00:00, 304.20it/s]
-Average reward over 1000 episodes: 8.18
+evaluating agent: 100%|████████████████████████████████████████| 1000/1000 [00:00<00:00, 1159.59it/s]
+evaluating agent: 100%|█████████████████████████████████████████| 1000/1000 [00:02<00:00, 359.89it/s]
+Average reward over 1000 episodes: 8.56
+Average reward of greedy policy: 8.56
 ```
 
 or to run the evaluation only (after training):
